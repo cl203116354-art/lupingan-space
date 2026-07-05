@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.vite/
+.tools/
+coverage/
+*.log
+
+# Local visual QA exports
+*-final.png
+*-reference-*.png
+character-poster-*.png
+design-qa-comparison.png
+design-qa.md
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

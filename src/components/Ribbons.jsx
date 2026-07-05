@@ -1,0 +1,244 @@
+import { useEffect, useRef } from 'react'
+import { Color, Polyline, Renderer, Transform, Vec3 } from 'ogl'
+import './Ribbons.css'
+
+export default function Ribbons({
+  colors = ['#fc8eac'],
+  baseSpring = 0.03,
+  baseFriction = 0.9,
+  baseThickness = 30,
+  offsetFactor = 0.05,
+  maxAge = 500,
+  pointCount = 50,
+  speedMultiplier = 0.6,
+  enableFade = false,
+  enableShaderEffect = false,
+  effectAmplitude = 2,
+  backgroundColor = [0, 0, 0, 0],
+}) {
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    const container = containerRef.current
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const compactViewport = window.matchMedia?.('(max-width: 767px)').matches
+
+    if (
+      !container ||
+      reduceMotion ||
+      compactViewport ||
+      typeof WebGLRenderingContext === 'undefined'
+    ) {
+      return undefined
+    }
+
+    const renderer = new Renderer({
+      dpr: Math.min(window.devicePixelRatio || 1, 2),
+      alpha: true,
+    })
+    const gl = renderer.gl
+
+    if (Array.isArray(backgroundColor) && backgroundColor.length === 4) {
+      gl.clearColor(
+        backgroundColor[0],
+        backgroundColor[1],
+        backgroundColor[2],
+        backgroundColor[3],
+      )
+    } else {
+      gl.clearColor(0, 0, 0, 0)
+    }
+
+    Object.assign(gl.canvas.style, {
+      position: 'absolute',
+      inset: '0',
+      width: '100%',
+      height: '100%',
+    })
+    container.appendChild(gl.canvas)
+
+    const scene = new Transform()
+    const lines = []
+
+    const vertex = `
+      precision highp float;
+      attribute vec3 position;
+      attribute vec3 next;
+      attribute vec3 prev;
+      attribute vec2 uv;
+      attribute float side;
+      uniform vec2 uResolution;
+      uniform float uDPR;
+      uniform float uThickness;
+      uniform float uTime;
+      uniform float uEnableShaderEffect;
+      uniform float uEffectAmplitude;
+      varying vec2 vUV;
+
+      vec4 getPosition() {
+        vec4 current = vec4(position, 1.0);
+        vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);
+        vec2 nextScreen = next.xy * aspect;
+        vec2 prevScreen = prev.xy * aspect;
+        vec2 tangent = normalize(nextScreen - prevScreen);
+        vec2 normal = vec2(-tangent.y, tangent.x);
+        normal /= aspect;
+        normal *= mix(1.0, 0.1, pow(abs(uv.y - 0.5) * 2.0, 2.0));
+        float dist = length(nextScreen - prevScreen);
+        normal *= smoothstep(0.0, 0.02, dist);
+        float pixelWidthRatio = 1.0 / (uResolution.y / uDPR);
+        float pixelWidth = current.w * pixelWidthRatio;
+        normal *= pixelWidth * uThickness;
+        current.xy -= normal * side;
+        if (uEnableShaderEffect > 0.5) {
+          current.xy += normal * sin(uTime + current.x * 10.0) * uEffectAmplitude;
+        }
+        return current;
+      }
+
+      void main() {
+        vUV = uv;
+        gl_Position = getPosition();
+      }
+    `
+
+    const fragment = `
+      precision highp float;
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uEnableFade;
+      varying vec2 vUV;
+
+      void main() {
+        float fadeFactor = 1.0;
+        if (uEnableFade > 0.5) {
+          fadeFactor = 1.0 - smoothstep(0.0, 1.0, vUV.y);
+        }
+        gl_FragColor = vec4(uColor, uOpacity * fadeFactor);
+      }
+    `
+
+    function resize() {
+      renderer.setSize(container.clientWidth, container.clientHeight)
+      lines.forEach((line) => line.polyline.resize())
+    }
+
+    const center = (colors.length - 1) / 2
+    colors.forEach((color, index) => {
+      const line = {
+        spring: baseSpring + (Math.random() - 0.5) * 0.05,
+        friction: baseFriction + (Math.random() - 0.5) * 0.05,
+        mouseVelocity: new Vec3(),
+        mouseOffset: new Vec3(
+          (index - center) * offsetFactor + (Math.random() - 0.5) * 0.01,
+          (Math.random() - 0.5) * 0.1,
+          0,
+        ),
+        points: Array.from({ length: pointCount }, () => new Vec3()),
+      }
+
+      line.polyline = new Polyline(gl, {
+        points: line.points,
+        vertex,
+        fragment,
+        uniforms: {
+          uColor: { value: new Color(color) },
+          uThickness: {
+            value: baseThickness + (Math.random() - 0.5) * 3,
+          },
+          uOpacity: { value: 1 },
+          uTime: { value: 0 },
+          uEnableShaderEffect: { value: enableShaderEffect ? 1 : 0 },
+          uEffectAmplitude: { value: effectAmplitude },
+          uEnableFade: { value: enableFade ? 1 : 0 },
+        },
+      })
+      line.polyline.mesh.setParent(scene)
+      lines.push(line)
+    })
+
+    resize()
+    window.addEventListener('resize', resize)
+
+    const mouse = new Vec3()
+    function updateMouse(event) {
+      const rect = container.getBoundingClientRect()
+      const pointer = event.changedTouches?.[0] ?? event
+      const x = pointer.clientX - rect.left
+      const y = pointer.clientY - rect.top
+      mouse.set(
+        (x / container.clientWidth) * 2 - 1,
+        (y / container.clientHeight) * -2 + 1,
+        0,
+      )
+    }
+
+    container.addEventListener('mousemove', updateMouse)
+    container.addEventListener('touchstart', updateMouse, { passive: true })
+    container.addEventListener('touchmove', updateMouse, { passive: true })
+
+    const tmp = new Vec3()
+    let frameId
+    let lastTime = performance.now()
+
+    function update() {
+      frameId = requestAnimationFrame(update)
+      const currentTime = performance.now()
+      const dt = currentTime - lastTime
+      lastTime = currentTime
+
+      lines.forEach((line) => {
+        tmp
+          .copy(mouse)
+          .add(line.mouseOffset)
+          .sub(line.points[0])
+          .multiply(line.spring)
+        line.mouseVelocity.add(tmp).multiply(line.friction)
+        line.points[0].add(line.mouseVelocity)
+
+        for (let index = 1; index < line.points.length; index += 1) {
+          if (Number.isFinite(maxAge) && maxAge > 0) {
+            const segmentDelay = maxAge / (line.points.length - 1)
+            const alpha = Math.min(1, (dt * speedMultiplier) / segmentDelay)
+            line.points[index].lerp(line.points[index - 1], alpha)
+          } else {
+            line.points[index].lerp(line.points[index - 1], 0.9)
+          }
+        }
+
+        line.polyline.mesh.program.uniforms.uTime.value = currentTime * 0.001
+        line.polyline.updateGeometry()
+      })
+
+      renderer.render({ scene })
+    }
+
+    update()
+
+    return () => {
+      window.removeEventListener('resize', resize)
+      container.removeEventListener('mousemove', updateMouse)
+      container.removeEventListener('touchstart', updateMouse)
+      container.removeEventListener('touchmove', updateMouse)
+      cancelAnimationFrame(frameId)
+      if (gl.canvas.parentNode === container) {
+        container.removeChild(gl.canvas)
+      }
+    }
+  }, [
+    colors,
+    baseSpring,
+    baseFriction,
+    baseThickness,
+    offsetFactor,
+    maxAge,
+    pointCount,
+    speedMultiplier,
+    enableFade,
+    enableShaderEffect,
+    effectAmplitude,
+    backgroundColor,
+  ])
+
+  return <div ref={containerRef} className="ribbons-container" />
+}
